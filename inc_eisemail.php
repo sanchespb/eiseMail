@@ -1246,16 +1246,10 @@ static function doReplacements($text, $arrReplacements){
  * @return string with subject
  */
 public static function getSubject($rfc822){
-    $separator = "\n";
-    $reSubj = '/^(Subject\:)/i';
-    $line = trim(strtok($rfc822, $separator));
-
-    while ($line !== false) {
-        if(preg_match($reSubj, $line)){
-            return trim(preg_replace($reSubj, '', $line));
-        }
-        $line = trim(strtok( $separator ));
+    if (preg_match('/^Subject:\s*(.+?)$/mi', $rfc822, $matches)) {
+        return trim($matches[1]);
     }
+    return 'Email_' . date('Y-m-d_H-i-s') . '_' . rand(100, 999);
 }
 
 }
