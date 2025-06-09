@@ -324,10 +324,7 @@ function send($arrMsg=null){
         if($this->conf['debug']){
             $this->arrMessages[$ix]['mail_from'] = ($this->conf['mail_from_debug'] ? $this->conf['mail_from_debug'] : $msg['mail_from']);
             $this->arrMessages[$ix]['rcpt_to'] =  ($this->conf['rcpt_to_debug'] 
-                ? (!is_array($this->conf['rcpt_to_debug'])    
-                    ? $this->conf['rcpt_to_debug']
-                    : array($this->conf['rcpt_to_debug'])
-                ) 
+                ? (array) $this->conf['rcpt_to_debug']
                 : $msg['rcpt_to']
             );
         }
@@ -380,7 +377,7 @@ function send($arrMsg=null){
             
             $this->say( $msg['fullMessage']."\r\n.\r\n", array(250));
 
-            $this->arrMessages[$ix]['send_time'] = mktime();
+            $this->arrMessages[$ix]['send_time'] = time();
 
             if($this->conf['flagAddToSentItems'] && $this->conf['imap_host'] && $this->imap){
 
