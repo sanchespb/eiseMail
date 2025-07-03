@@ -472,6 +472,10 @@ private function msg2String(&$msg){
     // fix bare line ends error with some SMTPs
     $msg['Text'] = str_replace("\n", "\r\n", str_replace("\r\n", "\n", $msg['Text']));
 
+    if($msg['Content-Type'] == 'text/html; charset=utf-8'){
+        $msg['Text'] = nl2br($msg['Text']); 
+    }
+
     $strMessage = '';
     if(is_array($msg['Attachments']))
         foreach ($msg['Attachments'] as $att){
