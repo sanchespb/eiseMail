@@ -81,10 +81,21 @@ public static $arrDefaultConfig = Array(
       , 'imap_login' => '' // (optional) IMAP login. By default it is set by 'login' field. Specify only if it differs from it.
       , 'imap_password' => '' // (optional) IMAP password.
       , 'imap_sent_items_mailbox' => 'Sent Items'
+      , 'From' => ''
+      , 'mail_from' => ''
+      , 'To' => ''
+      , 'rcpt_to' => ''
+      , 'Reply-To' => ''
+      , 'Content-Type' => ''
+      , 'charset' => ''
+      , 'Subject' => ''
+      , 'flagEscapeSubject' => false
+      , 'Head' => ''
+      , 'Bottom' => ''
 
       , 'verbose' => false // when set to TRUE class methods are sending actual conversation data to standard output
       , 'debug' => false // when set to TRUE mail is actually sent to 'rcpt_to_debug' address + verbose
-      //, 'mail_from_debug' => 'developer@e-ise.com' // MAIL FROM: to be used when debug is TRUE
+      , 'mail_from_debug' => ''//'developer@e-ise.com' // MAIL FROM: to be used when debug is TRUE
       //, 'rcpt_to_debug' => 'mailbox_for_test_messages@e-ise.com' // RCPT TO: to be used when debug is TRUE
 
   );
@@ -212,7 +223,7 @@ function addMessage ($msg){
         }
     }
 
-    if ($msg['subjPrefix'])
+    if (isset($msg['subjPrefix']) && $msg['subjPrefix'])
         $msg['Subject'] = $msg['subjPrefix'].($msg['Subject'] ? ' '.$msg['Subject'] : '');
 
     $msg['From'] = ($msg['From'] ? $msg['From'] : $msg['mail_from']); // if no From, we use mail_from
@@ -404,7 +415,7 @@ function send($arrMsg=null){
 
     $err = '';
     foreach ($this->arrMessages as $ix => $msg) {
-        if($msg['error'])
+        if(isset($msg['error']) && $msg['error'])
             $err .= ($err ? "\n" : '').$msg['error'].
                 (count($this->arrMessages)>=1 
                     ? " (message #".($ix+1).", subj: {$msg['Subject']})"
@@ -532,14 +543,14 @@ private function msg2String(&$msg){
         .($msg["Cc"] ? "Cc: {$msg["Cc"]}\r\n" : "")
         .($msg["Bcc"] ? "Bcc: {$msg["Bcc"]}\r\n" : "")
         ."X-Sender: ".$msg['mail_from']."\r\n"
-        ."Return-Path: ".($msg["Return-Path"]!=""
+        ."Return-Path: ".(isset($msg["Return-Path"]) && $msg["Return-Path"]!=""
                 ? $msg["Return-Path"] 
-                : ($msg["Reply-To"]!=""
+                : (isset($msg["Reply-To"]) && $msg["Reply-To"]!=""
                     ? $msg["Reply-To"] 
                     : $msg['mail_from']))."\r\n"
-        ."Errors-To: ".($msg["Erorrs-To"]!=""
-                ? $msg["Erorrs-To"] 
-                : ($msg["Reply-To"]!=""
+        ."Errors-To: ".(isset($msg["Errors-To"]) && $msg["Errors-To"]!=""
+                ? $msg["Errors-To"] 
+                : (isset($msg["Reply-To"]) && $msg["Reply-To"]!=""
                     ? $msg["Reply-To"]
                     : $msg['mail_from']))."\r\n"
         .($msg["Reply-To"]!="" ? 'Reply-To: '.$msg["Reply-To"]."\r\n" : '')
@@ -1062,6 +1073,8 @@ public function save($strMessage){
  */
 class eiseMailException extends Exception {
 
+public $arrMessages = array();
+
 /**
  * Receives user message and $messages array
  *
@@ -1098,6 +1111,12 @@ class eiseMail_base {
 const keyEscapePrefix = '##';
 const keyEscapeSuffix = '##';
 const passSymbolsToShow = 3;
+public $conf = array();
+public $connect = null;
+public $imap = null;
+public $msg = array();
+public $mailbox = null;
+public $conn_str = '';
 
 /**
  * This function echoes if 'verbose' configuration flag is on.
