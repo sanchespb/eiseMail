@@ -53,12 +53,26 @@
 class eiseSMTP extends eiseMail_base{
 
 /**
+ * eiseSMTP configuration and message default options associative array.
+ */
+public $conf = array();
+
+/**
  * Mail message queue to send.
  */
 public $arrMessages = array();
 
+/**
+ * Array of messages that were processed: whether they were sent or failed. In case of failure, each message will have 'error' member with error description.
+ */
+public $arrMessagesSent = array();
+
 static $Boundary = "==Multipart_Boundary_eiseMail";
 
+/**
+ * Default configuration associative array:
+ * 
+ */
 public static $arrDefaultConfig = Array(
 
       "Content-Type" => "text/plain" // message body content type
@@ -82,12 +96,39 @@ public static $arrDefaultConfig = Array(
       , 'imap_password' => '' // (optional) IMAP password.
       , 'imap_sent_items_mailbox' => 'Sent Items'
 
+      , 'nAttempts' => 3 // number of attempts to send mail in case of failure
+      , 'nAttemptDelay' => 5 // delay between attempts in seconds
+
       , 'verbose' => false // when set to TRUE class methods are sending actual conversation data to standard output
       , 'debug' => false // when set to TRUE mail is actually sent to 'rcpt_to_debug' address + verbose
       //, 'mail_from_debug' => 'developer@e-ise.com' // MAIL FROM: to be used when debug is TRUE
       //, 'rcpt_to_debug' => 'mailbox_for_test_messages@e-ise.com' // RCPT TO: to be used when debug is TRUE
 
   );
+
+/** 
+ * Default settings for each message in the queue ($arrMessages) - will be merged with the message passed to addMessage() method.
+ */
+public static $arrMsgDefaults = array(
+        'From' => null // From: as specified in header
+        , 'mail_from' => null // service field, argument to MAIL FROM command
+        , 'rcpt_to' => null // service field, argument to RCPT TO command, could be array
+        , 'Content-Type' => 'text/plain'
+        , 'charset' => 'utf-8'
+        , 'To' => null // To: as specified in header
+        , 'Reply-To' => null // To be set in header
+        , 'Cc' => null // Cc: as specified in header
+        , 'Bcc' => null // Bcc: as specified in header
+        , 'Return-Path' => null // Return-Path: to be set in header
+        , 'Errors-To' => null // Errors-To: to be set in header
+          , 'Subject' => null // message subject
+            , 'subjPrefix' => '' // subject prefix to be added before Subject
+            , 'flagEscapeSubject' => true // flag that tells whether to escape subject or not
+          , 'Head' => '' // message head
+          , 'Text' => '' // message body
+          , 'Bottom' => '' // message bottom
+        , 'Attachments' => array() // enumerable array of attachments
+    );
 
 /**
  * Constructor just initializes the object and covers password for possible verbose mode.
@@ -178,25 +219,9 @@ function __construct($arrConfig){
  */
 function addMessage ($msg){
 
-    $msgDefault = array(
-        'From' => $this->conf['From']
-        , 'mail_from' => $this->conf['mail_from'] // service field, argument to MAIL FROM command
-        , 'rcpt_to' => $this->conf['rcpt_to'] // service field, argument to RCPT TO command, could be array
-        , 'Content-Type' => $this->conf['Content-Type']
-        , 'charset' => $this->conf['charset']
-        , 'To' => $this->conf['To']
-        , 'Reply-To' => $this->conf['Reply-To']
-        , 'Cc' => null
-        , 'Bcc' => null
-          , 'Subject' => $this->conf['Subject']
-            , 'flagEscapeSubject' => $this->conf['flagEscapeSubject']
-          , 'Head' => $this->conf['Head']
-          , 'Text' => ''
-          , 'Bottom' => $this->conf['Bottom']
-        , 'Attachments' => array()
-    );
+    $msg_conf = array_merge(self::$arrMsgDefaults, $this->conf);
 
-    $msg = array_merge($msgDefault, $msg);
+    $msg = array_merge($msg_conf, $msg);
 
     if($this->conf['login']){
         $arr = (array)imap_rfc822_parse_adrlist(($msg['mail_from'] ? $msg['mail_from'] : $msg['From']), '');
@@ -212,7 +237,7 @@ function addMessage ($msg){
         }
     }
 
-    if ($msg['subjPrefix'])
+    if (isset($msg['subjPrefix']) && $msg['subjPrefix'])
         $msg['Subject'] = $msg['subjPrefix'].($msg['Subject'] ? ' '.$msg['Subject'] : '');
 
     $msg['From'] = ($msg['From'] ? $msg['From'] : $msg['mail_from']); // if no From, we use mail_from
@@ -263,10 +288,74 @@ function send($arrMsg=null){
 
     $this->v("Sending messages: ".count($this->arrMessages)."\n");
 
-    // connect
-    $this->connect = @fsockopen ($this->conf["host"], $this->conf["port"], $errno, $errstr, 30);
+    $attempt = 0;
 
-    if (!$this->connect) throw new eiseMailException("Can't connect to {$this->conf["host"]}:{$this->conf["port"]} - [$errno] $errstr", 1, null, $this->arrMessages);
+    do {
+        $this->v("Attempt #".($attempt+1)." of ".$this->conf['nAttempts']);
+        try {
+
+            $this->sendAllMessages();
+
+        } catch (eiseMailFatalException $e){
+            // fatal error - we stop attemts, messages to be returned to long-term queue
+            $this->v("Attempt #".($attempt+1)." fatally failed: ".$e->getMessage());
+            foreach ($this->arrMessages as $ix => $msg) {
+                $msg['error'] = $e->getMessage();
+                $msg['send_time'] = null;
+                $this->arrMessagesSent[] = $msg;
+            }
+            return $this->arrMessagesSent;
+
+        } catch (eiseMailException $e){
+            $this->v("Attempt #".($attempt+1)." failed: ".$e->getMessage());
+        }
+
+        $attempt++;
+
+
+    } while ($attempt < $this->conf['nAttempts'] && $this->arrMessages);
+
+    if ($this->arrMessages) {
+        // some messages were not sent
+        foreach ($this->arrMessages as $ix => $msg) {
+            if (!isset($msg['error'])) {
+                $msg['error'] = 'Maximum number of attempts reached';
+                $msg['send_time'] = null;
+            }
+            $this->arrMessagesSent[] = $msg;
+        }
+    }
+
+    return $this->arrMessagesSent;
+
+}
+
+protected function sendAllMessages(){
+
+    $this->v("Connecting to SMTP server {$this->conf["host"]}:{$this->conf["port"]} ...");
+
+    // handshake
+    $this->stage = 'smtp_handshake';
+    // connect
+    $context_conf = $this->conf['ssl_self_signed'] ? array(
+        'ssl' => array(
+            'verify_peer' => false,
+            'verify_peer_name' => false,
+            'allow_self_signed' => true,
+        )
+    ) : array();
+    $context = stream_context_create($context_conf);
+
+    $this->connect = stream_socket_client(
+        "tcp://{$this->conf["host"]}:{$this->conf["port"]}",
+        $errno,
+        $errstr,
+        10,
+        STREAM_CLIENT_CONNECT,
+        $context
+    );
+
+    if (!$this->connect) throw new eiseMailFatalException("Can't connect to {$this->conf["host"]}:{$this->conf["port"]} - [$errno] $errstr", 1, null);
 
     $this->coverPassword();
     $this->v("SMTP session started with the following params:\r\n".
@@ -279,12 +368,14 @@ function send($arrMsg=null){
             , true)
         );
 
-    $this->listen();
+    $this->listen(array(220));
 
-    $this->say("EHLO ".$this->conf["localhost"]."\r\n", array(250));
+    $response = $this->say("EHLO ".$this->conf["localhost"]."\r\n", array(250));
+
+    print($response);
     
     // TLSing
-    if ($this->conf['tls']){
+    if ($this->conf['tls'] && $this->isInSMTPResponse('STARTTLS', $response)) {
         $this->say( "STARTTLS\r\n" , array(220));
         // @stream_socket_enable_crypto($this->connect, true, STREAM_CRYPTO_METHOD_TLS_CLIENT);
         $crypto_method = STREAM_CRYPTO_METHOD_TLS_CLIENT;
@@ -294,9 +385,13 @@ function send($arrMsg=null){
             $crypto_method |= STREAM_CRYPTO_METHOD_TLSv1_1_CLIENT;
         }
 
-        stream_socket_enable_crypto($this->connect, true, $crypto_method);
+        $cryptoOk = stream_socket_enable_crypto($this->connect, true, $crypto_method);
+
+        if (!$cryptoOk) {
+            throw new eiseMailFatalException("TLS handshake failed with {$this->conf["host"]}:{$this->conf["port"]}");
+        }
         
-        $this->say( "HELO ".$this->conf["localhost"]."\r\n", array(250));
+        $this->say( "EHLO ".$this->conf["localhost"]."\r\n", array(250));
     }
 
     // auth
@@ -318,7 +413,7 @@ function send($arrMsg=null){
 
     } 
 
-
+    $this->stage = 'smtp_sending';
     foreach($this->arrMessages as $ix=>$msg){
 
         if($this->conf['debug']){
@@ -537,8 +632,8 @@ private function msg2String(&$msg){
                 : ($msg["Reply-To"]!=""
                     ? $msg["Reply-To"] 
                     : $msg['mail_from']))."\r\n"
-        ."Errors-To: ".($msg["Erorrs-To"]!=""
-                ? $msg["Erorrs-To"] 
+        ."Errors-To: ".($msg["Errors-To"]!=""
+                ? $msg["Errors-To"] 
                 : ($msg["Reply-To"]!=""
                     ? $msg["Reply-To"]
                     : $msg['mail_from']))."\r\n"
@@ -562,7 +657,7 @@ private function say($words, $arrExpectedReplyCode=array()){
     $this->v($words);
     fputs($this->connect, $words);
     $this->lastTransmission = $words;
-    $this->listen($arrExpectedReplyCode);
+    return $this->listen($arrExpectedReplyCode);
 }
 
 /**
@@ -595,6 +690,11 @@ private function listen($arrExpectedReplyCode=array()){
  */
 private function isItOk($rcv, $arrExpectedReplyCode){
 
+    if(!$rcv){
+        $this->v("ERROR: No response from server");
+        throw new eiseMailException("No response from server", 1, null, $this->arrMessages);
+    }
+
     if(count($arrExpectedReplyCode)==0){
         return;
     }
@@ -604,12 +704,38 @@ private function isItOk($rcv, $arrExpectedReplyCode){
 
         if (!in_array($code, $arrExpectedReplyCode)){
             $this->v("ERROR: {$rcv}");
-            throw new eiseMailException("Bad response: {$rcv} {$code}", 1, null, $this->arrMessages);
+            if($this->stage=='smtp_handshake'){
+                throw new eiseMailFatalException("Bad response: {$rcv} {$code}");
+            } elseif($this->stage=='smtp_sending'){
+                throw new eiseMailException("Bad response: {$rcv} {$code}");
+            }
         }
     }
 
 }
 
+private function isInSMTPResponse($valueToFind, $data){
+    $lines = explode("\r\n", trim($data));
+    print_r($lines);
+    foreach($lines as $line){
+        if(preg_match("/^([0-9]{3})[ -](.*)/", $line, $arr)){
+            if(strtoupper($valueToFind)==strtoupper($arr[2]))
+                return true;
+        }
+    }
+    return false;
+
+}
+
+private function getLineSMTPResponse($valueToFind, $data){
+    $lines = explode("\r\n", trim($data));
+    foreach($lines as $line){
+        if(preg_match("/^([0-9]{3})[ -](.*)/", $line, $arr)){
+            if(preg_match("/^".preg_quote($valueToFind, '/')."$/i", $arr[2]))
+                return $line;
+        }
+    }
+    return null;
 
 }
 
@@ -1060,28 +1186,9 @@ public function save($strMessage){
 /**
  * This extension of Exception class should allow us to pass back messages array in its actual state
  */
-class eiseMailException extends Exception {
+class eiseMailException extends Exception {}
 
-/**
- * Receives user message and $messages array
- *
- * @param $usrMsg {string} text user message
- * @param $arrMessages {array} array of messages that can be set as an attemp to save unsent / unhandled messages in case of exception.
- * 
- */
-function __construct($usrMsg, $code=1, $previous=null, $arrMessages=array()){
-    parent::__construct($usrMsg);
-    $this->arrMessages = $arrMessages;
-}
-
-/* 
-This function should be used in 'catch' block after eiseMail::send() activation to obtain eiseMail::arrMessages array in its actual state
-*/
-function getMessages(){ 
-    return $this->arrMessages;
-}
-
-}
+class eiseMailFatalException extends Exception {}
 
 
 /**
