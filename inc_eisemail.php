@@ -58,6 +58,11 @@ class eiseSMTP extends eiseMail_base{
 public $conf = array();
 
 /**
+ * Sending process stage: 'smtp_handshake', 'smtp_sending'.
+ */
+public $stage = null;
+
+/**
  * Mail message queue to send.
  */
 public $arrMessages = array();
@@ -98,7 +103,8 @@ public static $arrDefaultConfig = Array(
 
       , 'nAttempts' => 3 // number of attempts to send mail in case of failure
       , 'nAttemptDelay' => 5 // delay between attempts in seconds
-
+      
+      , 'ssl_self_signed' => false
       , 'verbose' => false // when set to TRUE class methods are sending actual conversation data to standard output
       , 'debug' => false // when set to TRUE mail is actually sent to 'rcpt_to_debug' address + verbose
       //, 'mail_from_debug' => 'developer@e-ise.com' // MAIL FROM: to be used when debug is TRUE
@@ -291,20 +297,21 @@ function send($arrMsg=null){
     $attempt = 0;
 
     do {
-        $this->v("Attempt #".($attempt+1)." of ".$this->conf['nAttempts']);
+        $this->v("\n\n\nAttempt #".($attempt+1)." of ".$this->conf['nAttempts']);
         try {
 
             $this->sendAllMessages();
+            return $this->arrMessages;
 
-        } catch (eiseMailFatalException $e){
+        } catch (eiseMailHandshakeException $e){
             // fatal error - we stop attemts, messages to be returned to long-term queue
             $this->v("Attempt #".($attempt+1)." fatally failed: ".$e->getMessage());
             foreach ($this->arrMessages as $ix => $msg) {
-                $msg['error'] = $e->getMessage();
-                $msg['send_time'] = null;
-                $this->arrMessagesSent[] = $msg;
+                if(empty($msg['send_time'])){
+                    $this->arrMessages[$ix]['error'] = $e->getMessage();
+                }
+                
             }
-            return $this->arrMessagesSent;
 
         } catch (eiseMailException $e){
             $this->v("Attempt #".($attempt+1)." failed: ".$e->getMessage());
@@ -312,21 +319,13 @@ function send($arrMsg=null){
 
         $attempt++;
 
-
-    } while ($attempt < $this->conf['nAttempts'] && $this->arrMessages);
-
-    if ($this->arrMessages) {
-        // some messages were not sent
-        foreach ($this->arrMessages as $ix => $msg) {
-            if (!isset($msg['error'])) {
-                $msg['error'] = 'Maximum number of attempts reached';
-                $msg['send_time'] = null;
-            }
-            $this->arrMessagesSent[] = $msg;
+        if ($attempt < $this->conf['nAttempts']) {
+            sleep($this->conf['nAttemptDelay']);
         }
-    }
 
-    return $this->arrMessagesSent;
+    } while ($attempt < $this->conf['nAttempts']);
+
+    return $this->arrMessages;
 
 }
 
@@ -346,7 +345,7 @@ protected function sendAllMessages(){
     ) : array();
     $context = stream_context_create($context_conf);
 
-    $this->connect = stream_socket_client(
+    $this->connect = @stream_socket_client(
         "tcp://{$this->conf["host"]}:{$this->conf["port"]}",
         $errno,
         $errstr,
@@ -355,7 +354,7 @@ protected function sendAllMessages(){
         $context
     );
 
-    if (!$this->connect) throw new eiseMailFatalException("Can't connect to {$this->conf["host"]}:{$this->conf["port"]} - [$errno] $errstr", 1, null);
+    if (!$this->connect) throw new eiseMailHandshakeException("Can't connect to {$this->conf["host"]}:{$this->conf["port"]} - [$errno] $errstr", 1, null);
 
     $this->coverPassword();
     $this->v("SMTP session started with the following params:\r\n".
@@ -366,14 +365,12 @@ protected function sendAllMessages(){
                     , $this->conf['passCovered']
                 )
             , true)
-        );
+        , 2);
 
     $this->listen(array(220));
 
     $response = $this->say("EHLO ".$this->conf["localhost"]."\r\n", array(250));
 
-    print($response);
-    
     // TLSing
     if ($this->conf['tls'] && $this->isInSMTPResponse('STARTTLS', $response)) {
         $this->say( "STARTTLS\r\n" , array(220));
@@ -388,7 +385,7 @@ protected function sendAllMessages(){
         $cryptoOk = stream_socket_enable_crypto($this->connect, true, $crypto_method);
 
         if (!$cryptoOk) {
-            throw new eiseMailFatalException("TLS handshake failed with {$this->conf["host"]}:{$this->conf["port"]}");
+            throw new eiseMailHandshakeException("TLS handshake failed with {$this->conf["host"]}:{$this->conf["port"]}");
         }
         
         $this->say( "EHLO ".$this->conf["localhost"]."\r\n", array(250));
@@ -414,7 +411,13 @@ protected function sendAllMessages(){
     } 
 
     $this->stage = 'smtp_sending';
+    $nFailed = 0;
     foreach($this->arrMessages as $ix=>$msg){
+
+        if(!empty($msg['send_time'])){
+            $this->v("Message ".($ix+1)." already sent, skipping.");
+            continue;
+        }
 
         if($this->conf['debug']){
             $this->arrMessages[$ix]['mail_from'] = ($this->conf['mail_from_debug'] ? $this->conf['mail_from_debug'] : $msg['mail_from']);
@@ -425,11 +428,11 @@ protected function sendAllMessages(){
         }
 
         if (!$this->arrMessages[$ix]['mail_from']){
-            $this->v('MAIL FROM is not set for the message '.var_export($msg, true));
+            $this->v('MAIL FROM is not set for the message ', 2);
             $this->arrMessages[$ix]['error'] = 'MAIL FROM not set'; continue;
         }
         if (!$this->arrMessages[$ix]['rcpt_to']){
-            $this->v('RCPT TO is not set for the message '.var_export($msg, true));
+            $this->v('RCPT TO is not set for the message ', 2);
             $this->arrMessages[$ix]['error'] = 'RCPT TO not set'; continue;
         }
 
@@ -480,8 +483,17 @@ protected function sendAllMessages(){
 
             }
 
-        } catch(eiseMailException $e){
+            $this->arrMessages[$ix]['error'] = null;
+
+        } catch(eiseMailSendException $e){
             $this->arrMessages[$ix]['error'] = $e->getMessage();
+            $this->arrMessages[$ix]['send_time'] = null;
+            $nFailed++;
+            $this->v("Message ".($ix+1)." sending failed: ".$e->getMessage());
+        } catch(eiseMailIMAPPostException $e){
+            // IMAP saving failed, but SMTP sending succeeded
+            $this->arrMessages[$ix]['error'] = $e->getMessage();
+            $this->v("Message ".($ix+1)." saving to Sent Items failed: ".$e->getMessage());
         }
 
         $strReset = "RSET\r\n";
@@ -497,18 +509,8 @@ protected function sendAllMessages(){
 
     $this->v('SMTP session complete');
 
-    $err = '';
-    foreach ($this->arrMessages as $ix => $msg) {
-        if($msg['error'])
-            $err .= ($err ? "\n" : '').$msg['error'].
-                (count($this->arrMessages)>=1 
-                    ? " (message #".($ix+1).", subj: {$msg['Subject']})"
-                    : ''
-                    );
-    }
-
-    if($err){
-        throw new eiseMailException("Mail send error: {$err}", 1, null, $this->arrMessages);
+    if($nFailed>0){
+        throw new eiseMailException("Some messages not sent: {$nFailed} of ".count($this->arrMessages));
     }
 
     return $this->arrMessages;
@@ -572,7 +574,7 @@ private function msg2String(&$msg){
         foreach ($msg['Attachments'] as $att){
 
             if (!$att['content'])
-                contunue;
+                continue;
 
             switch ($att['Content-Type']) {
                 case 'message/rfc822':
@@ -654,7 +656,7 @@ private function msg2String(&$msg){
  * @return void
  */
 private function say($words, $arrExpectedReplyCode=array()){
-    $this->v($words);
+    $this->v($words, 2);
     fputs($this->connect, $words);
     $this->lastTransmission = $words;
     return $this->listen($arrExpectedReplyCode);
@@ -673,7 +675,7 @@ private function listen($arrExpectedReplyCode=array()){
         $data .= $str;
         if(substr($str,3,1) == " ") { break; }
     }
-    $this->v("> {$data}");
+    $this->v("> {$data}", 2);
 
     $this->isItOk($data, $arrExpectedReplyCode);
 
@@ -705,9 +707,9 @@ private function isItOk($rcv, $arrExpectedReplyCode){
         if (!in_array($code, $arrExpectedReplyCode)){
             $this->v("ERROR: {$rcv}");
             if($this->stage=='smtp_handshake'){
-                throw new eiseMailFatalException("Bad response: {$rcv} {$code}");
+                throw new eiseMailHandshakeException("Bad response: {$rcv} {$code}");
             } elseif($this->stage=='smtp_sending'){
-                throw new eiseMailException("Bad response: {$rcv} {$code}");
+                throw new eiseMailSendException("Bad response: {$rcv} {$code}");
             }
         }
     }
@@ -716,7 +718,6 @@ private function isItOk($rcv, $arrExpectedReplyCode){
 
 private function isInSMTPResponse($valueToFind, $data){
     $lines = explode("\r\n", trim($data));
-    print_r($lines);
     foreach($lines as $line){
         if(preg_match("/^([0-9]{3})[ -](.*)/", $line, $arr)){
             if(strtoupper($valueToFind)==strtoupper($arr[2]))
@@ -736,6 +737,8 @@ private function getLineSMTPResponse($valueToFind, $data){
         }
     }
     return null;
+
+}
 
 }
 
@@ -1188,7 +1191,11 @@ public function save($strMessage){
  */
 class eiseMailException extends Exception {}
 
-class eiseMailFatalException extends Exception {}
+class eiseMailHandshakeException extends eiseMailException {}
+
+class eiseMailSendException extends eiseMailException {}
+
+class eiseMailIMAPPostException extends eiseMailException {}
 
 
 /**
@@ -1215,10 +1222,18 @@ const passSymbolsToShow = 3;
  *
  * @return void
  */
-protected function v($string){
-    if($this->conf['verbose']) {
+protected function v($string, $report_level=1){
+    if(!empty($this->conf['verbose'])) {
+
+        $verbosemode = explode(':', $this->conf['verbose']);
+
+        $verboselevel = isset($verbosemode[1]) ? (int)$verbosemode[1] : 1;
+
+        if($report_level > $verboselevel)
+            return;
+
         $string = (strlen($string)>1024 ? "(data length ".strlen($string).")" : $string);
-        echo (Date('Y-m-d H:i:s').': '.($this->conf['verbose']==='htmlspecialchars' ? htmlspecialchars($string) : trim($string) )."\n");
+        echo (Date('Y-m-d H:i:s').': '.($verbosemode[0]==='htmlspecialchars' ? htmlspecialchars($string) : trim($string) )."\n");
         ob_flush();
         flush();
     }
