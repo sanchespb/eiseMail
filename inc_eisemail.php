@@ -236,7 +236,7 @@ function addMessage ($msg){
             $msg['Reply-To'] = ($msg['mail_from'] ? $msg['mail_from'] : $msg['From']);
             $msg['mail_from'] = $this->conf['login'];
             if($this->conf['authenticate']=='serviceaccount'){
-                $personal = ($from->personal ? $from->personal : $from->mailbox);
+                $personal = (isset($from->personal) && $from->personal ? $from->personal : $from->mailbox);
                 $msg['From'] = "\"{$personal} {$this->conf['serviceaccount_disclaimer']}\" <{$this->conf['login']}>";
             }
             
@@ -1273,7 +1273,7 @@ static function explodeAddresses($addrList, $defaultDomain = ''){
     $arrRet = array();
 
     foreach($arr as $o){
-        if(!$o->host || $o->host==='.SYNTAX-ERROR.'){
+        if(!isset($o->host) || $o->host==='.SYNTAX-ERROR.'){
             continue;
         }
         $arrRet[] = (!empty($o->personal) ? '"'.$o->personal.'" ' : '').'<'.$o->mailbox.'@'.$o->host.'>';
@@ -1300,8 +1300,9 @@ static function getAddresses($addrList, $defaultDomain = ''){
     $arrRet = array();
 
     foreach($arr as $o){
-        $arrRet[] = strtolower($o->mailbox.'@'.$o->host);
-    
+        if (isset($o->mailbox) && isset($o->host)) {
+            $arrRet[] = strtolower($o->mailbox.'@'.$o->host);
+        }
     }
 
     return array_unique($arrRet);
